@@ -1,9 +1,14 @@
 # 3. Protocol Overview
 
-There are technically four distinct (sub)protocols needed in order to fully use all of the features proposed in this document:
+We define four distinct (sub)protocols:
 
-1. **Mining Protocol**  
-   Direct successor to Stratum v1. A mining device uses this main protocol to communicate with its upstream node, pool, or proxy. A proxy uses it to communicate with a pool (or another proxy). Must be implemented in all scenarios. Only protocol used if a miner/pool does not support transaction selection.
+1. **Mining Protocol** aka "Main" Protocol
+   Direct successor to Stratum v1, defines the communication protocol between and among Stratum roles.
+
+   - End-mining device -> upstream node, pool, or proxy.
+   - Proxy -> pool (or another proxy).
+
+   Required for all implementations and for any Stratum v2 configuration possibility. If a miner/pool does not support transaction selection, this is the only required protocol.
 
 2. **Job Negotiation Protocol**  
    Miners (or mining farms) negotiate block templates with pool. Pool can reuse negotiation outcomes across all end-miner connections to reduce computational intensity. A single negotiation can multicast to multiple farms with hundreds of thousands of devices.
