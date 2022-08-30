@@ -1,94 +1,93 @@
 # 4. Mining Protocol
 
-
 ## 4.1 Channels
-The protocol is designed such that downstream devices (or proxies) open communication channels with upstream stratum nodes within established connections.
-The upstream stratum endpoints could be actual mining servers or proxies that pass the messages further upstream.
+
+Downstream devices (or proxies) can open communication channels with upstream stratum nodes within established connections.
+We define 'upstream stratum endpoints' as either actual mining servers or intermediate proxies.
 Each channel identifies a dedicated mining session associated with an authorized user.
 Upstream stratum nodes accept work submissions and specify a mining target on a per-channel basis.
 
-There can theoretically be up to 232 open channels within one physical connection to an upstream stratum node.
-All channels are independent of each other, but share some messages broadcast from the server for higher efficiency (e.g. information about a new prevhash).
-Each channel is identified by its `channel_id` (`U32`), which is consistent throughout the whole life of the connection.
+Each physical connection to an upstream is limited to 232 channels.
 
-A proxy can either transparently allow its clients to open separate channels with the server (preferred behavior) or aggregate open connections from downstream devices into its own open channel with the server and translate the messages accordingly (present mainly for allowing v1 proxies).
-Both options have some practical use cases.
-In either case, proxies SHOULD aggregate clients' channels into a smaller number of TCP connections.
-This saves network traffic for broadcast messages sent by a server because fewer messages need to be sent in total, which leads to lower latencies as a result.
-And it further increases efficiency by allowing larger packets to be sent.
+All channels are independent, but can share some messages broadcast from the server for higher efficiency (e.g. new prevhash info).
+Each channel has a persistent `channel_id` (`U32`), for the lifetime of the connection.
 
-The protocol defines three types of channels: **standard channels**, **extended channels** (mining sessions) and **group channels** (organizational), which are useful for different purposes.
+Proxy can either
 
-The main difference between standard and extended channels is that standard channels cannot manipulate the coinbase transaction / Merkle path, as they operate solely on provided Merkle roots.
-We call this header-only mining.
-Extended channels, on the other hand, are given extensive control over the search space so that they can implement various advanced use cases such as translation between v1 and v2 protocols, difficulty aggregation, custom search space splitting, etc.
+- Transparently allow clients to open separate channels with the server (preferred behavior) or
+- Aggregate open connections from downstream devices into a single aggregate open channel with server(recommended for v1 proxy translation)
 
-This separation vastly simplifies the protocol implementation for clients that don’t support extended channels, as they only need to implement the subset of protocol messages related to standard channels (see Mining Protocol Messages for details).
+In either case, proxies SHOULD aggregate clients' channels into batched TCP connections to minimize message traffic rounds, reduce latency, and more efficiently multicast to downstream mining devices.
 
+The protocol defines three channel types:
+
+- **Standard Channels**
+  - Standard channels cannot manipulate the coinbase transaction / Merkle path; they operate solely on provided Merkle roots. We call this 'header-only' mining.
+- **Extended Channels** (mining sessions)
+  - Extended channels have extensive control over the search space, including coinbase tx, & can implement various advanced use cases including v1<->v2 protocol translation, difficulty aggregation, & custom search space splitting.
+- **Group Channels** (organizational)
+
+This separation vastly simplifies the protocol implementation for clients that don’t support extended channels. Standard Channel exclusive implementations only need to implement the subset of protocol messages related to standard channels (see Mining Protocol Messages for details).
 
 ### 4.1.1 Standard Channels
-Standard channels are intended to be used by end mining devices. 
 
-The size of the search space for one standard channel (header-only mining) for one particular value in the `nTime` field is `2^(NONCE_BITS + VERSION_ROLLING_BITS) = ~280Th`, where `NONCE_BITS = 32` and `VERSION_ROLLING_BITS = 16`.
-This is a guaranteed space before `nTime` rolling (or changing the Merkle root). 
+Intended for end-mining devices.
+
+The search space size for one standard channel (header-only mining) for one particular value in the `nTime` field is `2^(NONCE_BITS + VERSION_ROLLING_BITS) = ~280Th`, where `NONCE_BITS = 32` and `VERSION_ROLLING_BITS = 16`.
+This is a guaranteed space before `nTime` rolling (or changing the Merkle root).
 
 The protocol dedicates all directly modifiable bits (`version`, `nonce`, and `nTime`) from the block header to one mining channel.
-This is the smallest assignable unit of search space by the protocol.
-The client which opened the particular channel owns the whole assigned space and can split it further if necessary (e.g. for multiple hashing boards and for individual chips etc.).
-
+This is the protocol's smallest assignable unit of search space.
+The channel's client party owns the whole assigned space and can split it further if necessary (e.g. for multiple hashing boards, individual chips etc.).
 
 ### 4.1.2 Extended Channels
-Extended channels are intended to be used by proxies.
-Upstream servers which accept connections and provide work MUST support extended channels.
-Clients, on the other hand, do not have to support extended channels, as they MAY be implemented more simply with only standard channels at the end-device level.
-Thus, upstream servers providing work MUST also support standard channels.
 
-The size of search space for an extended channel is `2^(NONCE_BITS+VERSION_ROLLING_BITS+extranonce_size*8)` per `nTime` value.
+Intended for proxies.
+Upstream servers MUST support extended channels in order to accept connections and provide work, and they SHOULD support standard channels.
+Clients do not have to support extended channels; they MAY be implemented more simply with only standard channels at the end-device level.
 
+The search space size for an extended channel is `2^(NONCE_BITS+VERSION_ROLLING_BITS+extranonce_size*8)` per `nTime` value.
 
 ### 4.1.3 Group Channels
-Standard channels opened within one particular connection can be grouped together to be addressable by a common communication group channel.
 
-Whenever a standard channel is created it is always put into some channel group identified by its `group_channel_id`.
-Group channel ID namespace is the same as channel ID namespace on a particular connection but the values chosen for group channel IDs must be distinct. 
+Standard channels opened within one particular connection can be grouped together and addressed as a common communication group channel.
 
+New channels MUST always be put into some channel group identified by its `group_channel_id`.
+Group channel ID namespace is the same as channel ID namespace on a particular connection, but the values chosen for group channel IDs must be distinct.
 
 ### 4.1.4 Future Jobs
-An empty future block job or speculated non-empty job can be sent in advance to speedup new mining job distribution.
-The point is that the mining server MAY have precomputed such a job and is able to pre-distribute it for all active channels.
-The only missing information to start to mine on the new block is the new prevhash.
-This information can be provided independently.
 
-Such an approach improves the efficiency of the protocol where the upstream node does not waste precious time immediately after a new block is found in the network.
-
+An empty future block job or speculated non-empty job can be sent in advance to speed up new mining job distribution.
+The mining server MAY precompute such a job, including all information except the new prevhash, and pre-distribute it for all active channels.
+The new prehash can be provided independently. End mining devices immediately begin mining the next block on receipt of new prevhash message.
 
 ## 4.2 Hashing Space Distribution
-Each mining device has to work on a unique part of the whole search space.
-The full search space is defined in part by valid values in the following block header fields:
+
+Each mining device works on a unique portion of the full search space.
+The full search space is defined by 4 valid values in the following block header fields:
 
 - Nonce header field (32 bits)
 - Version header field (16 bits, as specified by [BIP 320](https://github.com/bitcoin/bips/blob/master/bip-0320.mediawiki))
-- Timestamp header field 
+- Timestamp header field
 
-The other portion of the block header that’s used to define the full search space is the Merkle root hash of all transactions in the block, projected to the last variable field in the block header:
+The final portion of full search space is the Merkle root hash of all transactions in the block, projected to the last variable field in the block header:
 
 - Merkle root, deterministically computed from:
   - Coinbase transaction: typically 4-8 bytes, possibly much more.
   - Transaction set: practically unbounded space.
     All roles in Stratum v2 MUST NOT use transaction selection/ordering for additional hash space extension.
-    This stems both from the concept that miners/pools should be able to choose their transaction set freely without any interference with the protocol, and also to enable future protocol modifications to Bitcoin.
-    In other words, any rules imposed on transaction selection/ordering by miners not described in the rest of this document may result in invalid work/blocks.
+    (Miners/pools should be able to choose their transaction set freely without disrupting the protocol. Any rules imposed on transaction selection/ordering by miners not described in the rest of this document may result in invalid work/blocks.)
 
 Mining servers MUST assign a unique subset of the search space to each connection/channel (and therefore each mining device) frequently and rapidly enough so that the mining devices are not running out of search space.
-Unique jobs can be generated regularly by: 
+Unique jobs are regularly generated by:
 
-- Putting unique data into the coinbase for each connection/channel, and/or 
-- Using unique work from a work provider, e.g. a previous work update (note that this is likely more difficult to implement, especially in light of the requirement that transaction selection/ordering not be used explicitly for additional hash space distribution).
+- Putting unique data into the coinbase for each connection/channel, and/or
+- Using unique work from a work provider, e.g. a previous work update. (Note: this is more difficult to implement without affecting transaction selection/ordering, which, again, MUST NOT be used explicitly for additional hash space distribution)
 
-This protocol explicitly expects that upstream server software is able to manage the size of the hashing space correctly for its clients and can provide new jobs quickly enough.
-
+This protocol explicitly expects upstream server software to manage hashing space size correctly for its clients without impacting new job distributions.
 
 ## 4.3 Mining Protocol Messages
+
 ![4.3.a Mining Protocol Messages: Initialization](./img/4.3.a-Mining-Protocol-Messages-Initialization.png)  
 Figure 4.3.a Mining Protocol Messages: Initialization
 
@@ -96,6 +95,7 @@ Figure 4.3.a Mining Protocol Messages: Initialization
 Figure 4.3.b Mining Protocol Messages: Mining on Standard Channel
 
 ### 4.3.1 `SetupConnection` Flags for Mining Protocol
+
 Flags usable in `SetupConnection.flags` and `SetupConnection.Error::flags`:
 
 ```
@@ -115,6 +115,7 @@ Flags usable in `SetupConnection.flags` and `SetupConnection.Error::flags`:
 ```
 
 Flags usable in `SetupConnection.Success.flags`:
+
 ```
 +----------------------------+-----+-----------------------------------------------------------------------------------+
 | Field Name                 | Bit | Description                                                                       |
@@ -128,8 +129,8 @@ Flags usable in `SetupConnection.Success.flags`:
 +----------------------------+-----+-----------------------------------------------------------------------------------+
 ```
 
-
 ### 4.3.2 `OpenStandardMiningChannel` (Client -> Server)
+
 This message requests to open a standard channel to the upstream node.
 
 After receiving a `SetupConnection.Success` message, the client SHOULD respond by opening channels on the connection.
@@ -161,8 +162,8 @@ Clients must also communicate information about their hashing power in order to 
 +-------------------+-----------+--------------------------------------------------------------------------------------+
 ```
 
-
 ### 4.3.3 `OpenStandardMiningChannel.Success` (Server -> Client)
+
 Sent as a response for opening a standard channel, if successful.
 
 ```
@@ -185,8 +186,8 @@ Sent as a response for opening a standard channel, if successful.
 +-------------------+-----------+--------------------------------------------------------------------------------------+
 ```
 
-
 ### 4.3.4 `OpenExtendedMiningChannel` (Client -> Server)
+
 Similar to [4.3.2 `OpenStandardMiningChannel`](https://github.com/stratum-mining/sv2-spec/blob/main/04-Mining-Protocol.md#432-openstandardminingchannel-client---server), but requests to open an extended channel instead of standard channel.
 
 ```
@@ -199,8 +200,8 @@ Similar to [4.3.2 `OpenStandardMiningChannel`](https://github.com/stratum-mining
 +---------------------+-----------+------------------------------------------------------------------------------------+
 ```
 
-
 ### 4.3.5 `OpenExtendedMiningChannel.Success` (Server -> Client)
+
 Sent as a response for opening an extended channel.
 
 ```
@@ -221,8 +222,8 @@ Sent as a response for opening an extended channel.
 +-------------------+-----------+--------------------------------------------------------------------------------------+
 ```
 
-
 ### 4.3.6 `OpenMiningChannel.Error` (Server -> Client)
+
 ```
 +------------+-----------+---------------------------------------------------------------------------------------------+
 | Field Name | Data Type | Description                                                                                 |
@@ -234,11 +235,12 @@ Sent as a response for opening an extended channel.
 ```
 
 Possible error codes:
+
 - `unknown-user`
 - `max-target-out-of-range`
 
-
 ### 4.3.7 `UpdateChannel` (Client -> Server)
+
 Client notifies the server about changes on the specified channel.
 If a client performs device/connection aggregation (i.e. it is a proxy), it MUST send this message when downstream channels change.
 This update can be debounced so that it is not sent more often than once in a second (for a very busy proxy).
@@ -259,8 +261,8 @@ This update can be debounced so that it is not sent more often than once in a se
 
 When `maximum_target` is smaller than currently used maximum target for the channel, upstream node MUST reflect the client’s request (and send appropriate `SetTarget` message).
 
-
 ### 4.3.8 `UpdateChannel.Error` (Server -> Client)
+
 Sent only when `UpdateChannel` message is invalid. When it is accepted by the server, no response is sent back.
 
 ```
@@ -274,11 +276,12 @@ Sent only when `UpdateChannel` message is invalid. When it is accepted by the se
 ```
 
 Possible error codes:
+
 - `max-target-out-of-range`
 - `invalid-channel-id`
 
-
 ### 4.3.9 `CloseChannel` (Client -> Server, Server -> Client)
+
 Client sends this message when it ends its operation.
 The server MUST stop sending messages for the channel.
 A proxy MUST send this message on behalf of all opened channels from a downstream connection in case of downstream connection closure.
@@ -296,8 +299,8 @@ A proxy MUST send this message on behalf of all opened channels from a downstrea
 If a proxy is operating in channel aggregating mode (translating downstream channels into aggregated extended upstream channels), it MUST send an `UpdateChannel` message when it receives `CloseChannel` or connection closure from a downstream connection.
 In general, proxy servers MUST keep the upstream node notified about the real state of the downstream channels.
 
-
 ### 4.3.10 `SetExtranoncePrefix` (Server -> Client)
+
 Changes downstream node’s extranonce prefix.
 It is applicable for all jobs sent after this message on a given channel (both jobs provided by the upstream or jobs introduced by `SetCustomMiningJob` message).
 This message is applicable only for explicitly opened extended channels or standard channels (not group channels).
@@ -312,9 +315,9 @@ This message is applicable only for explicitly opened extended channels or stand
 +-------------------+-----------+--------------------------------------------------------------------------------------+
 ```
 
-
 ### 4.3.11 `SubmitSharesStandard` (Client -> Server)
-Client sends result of its hashing work to the server.  
+
+Client sends result of its hashing work to the server.
 
 ```
 +-----------------+-----------+----------------------------------------------------------------------------------------+
@@ -336,8 +339,8 @@ Client sends result of its hashing work to the server.
 +-----------------+-----------+----------------------------------------------------------------------------------------+
 ```
 
-
 ### 4.3.12 `SubmitSharesExtended` (Client -> Server)
+
 Only relevant for extended channels.
 The message is the same as `SubmitShares`, with the following additional field:
 
@@ -355,8 +358,8 @@ The message is the same as `SubmitShares`, with the following additional field:
 +-------------------+-----------+--------------------------------------------------------------------------------------+
 ```
 
-
 ### 4.3.13 `SubmitShares.Success` (Server -> Client)
+
 Response to `SubmitShares` or `SubmitSharesExtended`, accepting results from the miner.
 Because it is a common case that shares submission is successful, this response can be provided for multiple `SubmitShare` messages aggregated together.
 
@@ -378,8 +381,8 @@ The server does not have to double check that the sequence numbers sent by a cli
 It can simply use the last one received when sending a response.
 It is the client’s responsibility to keep the sequence numbers correct/useful.
 
-
 ### 4.3.14 `SubmitShares.Error` (Server -> Client)
+
 An error is immediately submitted for every incorrect submit attempt.
 In case the server is not able to immediately validate the submission, the error is sent as soon as the result is known.
 This delayed validation can occur when a miner gets faster updates about a new prevhash than the server does (see `NewPrevHash` message for details).
@@ -397,12 +400,13 @@ This delayed validation can occur when a miner gets faster updates about a new p
 ```
 
 Possible error codes:
+
 - `invalid-channel-id`
 - `stale-share`
 - `difficulty-too-low`
 
-
 ### 4.3.15 `NewMiningJob` (Server -> Client)
+
 The server provides an updated mining job to the client through a standard channel.
 If the `future_job` field is set to False, the client MUST start to mine on the new job as soon as possible after receiving this message.
 
@@ -428,8 +432,8 @@ If the `future_job` field is set to False, the client MUST start to mine on the 
 +-------------+-----------+--------------------------------------------------------------------------------------------+
 ```
 
-
 ### 4.3.16 `NewExtendedMiningJob` (Server -> Client)
+
 (Extended and group channels only)
 
 For an **extended channel**:
@@ -474,17 +478,19 @@ A proxy MUST translate the message for all downstream channels belonging to the 
 | coinbase_tx_suffix      | B0_64K         | Suffix part of the coinbase transaction                                   |
 +-------------------------+----------------+---------------------------------------------------------------------------+
 ```
+
 \*The full coinbase is constructed by inserting one of the following:
 
 - For a **standard channel**: `extranonce_prefix`
 - For an **extended channel**: `extranonce_prefix + extranonce (=N bytes)`, where `N` is the negotiated extranonce space for the channel (`OpenMiningChannel.Success.extranonce_size`)
 
 ### 4.3.17 `SetNewPrevHash` (Server -> Client, broadcast)
+
 Prevhash is distributed whenever a new block is detected in the network by an upstream node.
 This message MAY be shared by all downstream nodes (sent only once to each channel group).
 Clients MUST immediately start to mine on the provided prevhash.
 When a client receives this message, only the job referenced by Job ID is valid.
-The remaining jobs already queued by the client have to be made invalid. 
+The remaining jobs already queued by the client have to be made invalid.
 
 Note: There is no need for block height in this message.
 
@@ -507,8 +513,8 @@ Note: There is no need for block height in this message.
 +------------+----------------+----------------------------------------------------------------------------------------+
 ```
 
-
 ### 4.3.18 `SetCustomMiningJob` (Client -> Server)
+
 Can be sent only on extended channel.
 `SetupConnection.flags` MUST contain `REQUIRES_WORK_SELECTION` flag (work selection feature successfully negotiated).
 
@@ -563,8 +569,8 @@ The `mining_job_token` provides the information for the pool to authorize the cu
 +-----------------------------+------------------+---------------------------------------------------------------------+
 ```
 
-
 ### 4.3.19 `SetCustomMiningJob.Success` (Server -> Client)
+
 Response from the server when it accepts the custom mining job.
 Client can start to mine on the job immediately (by using the `job_id` provided within this response).
 
@@ -584,12 +590,14 @@ Client can start to mine on the job immediately (by using the `job_id` provided 
 | coinbase_tx_suffix          | B0_64K    | Suffix part of the coinbase transaction                                    |
 +-----------------------------+-----------+----------------------------------------------------------------------------+
 ```
+
 \*The full coinbase is constructed by inserting one of the following:
 
 - For a **standard channel**: `extranonce_prefix`
 - For an **extended channel**: `extranonce_prefix + extranonce (=N bytes)`, where `N` is the negotiated extranonce space for the channel (`OpenMiningChannel.Success.extranonce_size`)
 
 ### 4.3.20 `SetCustomMiningJob.Error` (Server -> Client)
+
 ```
 +------------+-----------+---------------------------------------------------------------------------------------------+
 | Field Name | Data Type | Description                                                                                 |
@@ -604,12 +612,13 @@ Client can start to mine on the job immediately (by using the `job_id` provided 
 ```
 
 Possible errors:
+
 - `invalid-channel-id`
 - `invalid-mining-job-token`
 - `invalid-job-param-value-{}` - `{}` is replaced by a particular field name from `SetCustomMiningJob` message
 
-
 ### 4.3.21 `SetTarget` (Server -> Client)
+
 The server controls the submission rate by adjusting the difficulty target on a specified channel.
 All submits leading to hashes higher than the specified target will be rejected by the server.
 
@@ -628,9 +637,9 @@ The message is not applicable for already received jobs with `future_job=False`,
 
 When `SetTarget` is sent to a group channel, the maximum target is applicable to all channels in the group.
 
-
 ### 4.3.22 `Reconnect` (Server -> Client)
-This message allows clients to be redirected to a new upstream node. 
+
+This message allows clients to be redirected to a new upstream node.
 
 ```
 +------------+-----------+---------------------------------------------------------------------------------------------+
@@ -649,8 +658,8 @@ For security reasons, it is not possible to reconnect to a server with a certifi
 The message intentionally does not contain a **pool public key** and thus cannot be used to reconnect to a different pool.
 This ensures that an attacker will not be able to redirect hashrate to an arbitrary server should the pool server get compromised and instructed to send reconnects to a new location.
 
-
 ### 4.3.23 `SetGroupChannel` (Server -> Client)
+
 Every standard channel is a member of a group of standard channels, addressed by the upstream server's provided identifier.
 The group channel is used mainly for efficient job distribution to multiple standard channels at once.
 
@@ -661,7 +670,6 @@ A channel (identified by particular ID) becomes a group channel when it is used 
 The server MUST ensure that a group channel has a unique channel ID within one connection. Channel reinterpretation is not allowed.
 
 This message can be sent only to connections that don’t have `REQUIRES_STANDARD_JOBS` flag in `SetupConnection`.
-
 
 ```
 +------------------+---------------+-----------------------------------------------------------------------------------+
